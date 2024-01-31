@@ -1,8 +1,12 @@
 import os
 
 import numpy as np
+from astropy.visualization.wcsaxes import WCSAxesSubplot
+from glue.viewers.common.layer_artist import LayerArtist
+from glue.viewers.image.viewer import MatplotlibImageMixin
+from glue.viewers.matplotlib.viewer import MatplotlibViewerMixin
 
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QCheckBox
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QRadioButton
 
 from glue_qt.config import qt_client
 from glue.core.data_combo_helper import ComponentIDComboHelper
@@ -11,9 +15,12 @@ from echo import CallbackProperty, SelectionCallbackProperty
 from echo.qt import (connect_checkable_button,
                                    autoconnect_callbacks_to_qt)
 
-from glue.viewers.matplotlib.layer_artist import MatplotlibLayerArtist
-from glue.viewers.matplotlib.state import MatplotlibDataViewerState, MatplotlibLayerState
-from glue_qt.viewers.matplotlib.data_viewer import MatplotlibDataViewer
+from glue.viewers.image.layer_artist import ImageLayerArtist
+from glue.viewers.image.state import ImageViewerState, ImageLayerState
+from glue_qt.viewers.image.data_viewer import ImageViewer
+from glue_qt.viewers.matplotlib.widget import MplWidget
+from glue.viewers.image.frb_artist import imshow
+from glue.viewers.image.composite_array import CompositeArray
 
 from glue_qt.utils import load_ui
 
@@ -22,81 +29,27 @@ from mpl_toolkits.axes_grid1 import ImageGrid
 from matplotlib.image import AxesImage
 
 
-class SOMViewerState(MatplotlibDataViewerState):
-
-    x_att = SelectionCallbackProperty(docstring='The attribute to use on the x-axis')
-    y_att = SelectionCallbackProperty(docstring='The attribute to use on the y-axis')
-
-    def __init__(self, *args, **kwargs):
-        super(SOMViewerState, self).__init__(*args, **kwargs)
-        self._x_att_helper = ComponentIDComboHelper(self, 'x_att')
-        self._y_att_helper = ComponentIDComboHelper(self, 'y_att')
-        self.add_callback('layers', self._on_layers_change)
-        self.add_callback('x_att', self._on_attribute_change)
-        self.add_callback('y_att', self._on_attribute_change)
-
-    def _on_layers_change(self, value):
-        self._x_att_helper.set_multiple_data(self.layers_data)
-        self._y_att_helper.set_multiple_data(self.layers_data)
-
-    def _on_attribute_change(self, value):
-        if self.x_att is not None:
-            self.x_axislabel = self.x_att.label
-        if self.y_att is not None:
-            self.y_axislabel = self.y_att.label
+class SOMViewerState(ImageViewerState):
+    def __init__(self, **kwargs):
+        super(SOMViewerState, self).__init__(**kwargs)
 
 
-class SOMLayerState(MatplotlibLayerState):
-    fill = CallbackProperty(False, docstring='Whether to show the markers as filled or not')
+class SOMLayerState(ImageLayerState):
+    def __init__(self):
+        super(SOMLayerState, self).__init__()
 
 
-class SOMLayerArtist(MatplotlibLayerArtist):
+class SOMLayerArtist(LayerArtist):
 
-    _layer_state_cls = SOMLayerState
+    _layer_state_cls = ImageLayerState
 
-    def __init__(self, axes, *args, **kwargs):
-
-        super(SOMLayerArtist, self).__init__(axes, *args, **kwargs)
-
-        #self.artist = self.axes.plot([], [], 'o', mec='none')[0]
-        self.artist = AxesImage(self.axes)
-        self.axes.imshow(self.artist)
-        self.mpl_artists.append(self.artist)
-
-        self.state.add_callback('visible', self._on_visual_change)
-        self.state.add_callback('zorder', self._on_visual_change)
-        self.state.add_callback('alpha', self._on_visual_change)
-
-        self._viewer_state.add_callback('x_att', self._on_attribute_change)
-        self._viewer_state.add_callback('y_att', self._on_attribute_change)
-
-    def _on_visual_change(self, value=None):
-
-        self.artist.set_visible(self.state.visible)
-        self.artist.set_zorder(self.state.zorder)
-        self.artist.set_alpha(self.state.alpha)
-
-        self.redraw()
-
-    def _on_attribute_change(self, value=None):
-
-        if self._viewer_state.x_att is None or self._viewer_state.y_att is None:
-            return
-
-        x = self.state.layer[self._viewer_state.x_att]
-        y = self.state.layer[self._viewer_state.y_att]
-
-        self.artist.set_data(x)
-
-        self.axes.set_xlim(np.nanmin(x), np.nanmax(x))
-        self.axes.set_ylim(np.nanmin(y), np.nanmax(y))
-
-        self.redraw()
-
-    def update(self):
-        self._on_attribute_change()
-        self._on_visual_change()
-
+    def __init__(self, axs, *args, **kwargs):
+        super(SOMLayerArtist, self).__init__(*args, **kwargs)
+        self.axs = axs
+        self.images = []
+        for i in range(len(self.axs)):
+            image = ImageLayerArtist(self.axs[i], *args, **kwargs)
+            self.images.append(image)
 
 class SOMViewerStateWidget(QWidget):
 
@@ -108,7 +61,7 @@ class SOMViewerStateWidget(QWidget):
                           directory=os.path.dirname(__file__))
 
         self.viewer_state = viewer_state
-        self._connections = autoconnect_callbacks_to_qt(self.viewer_state, self.ui)
+        #self._connections = autoconnect_callbacks_to_qt(self.viewer_state, self.ui)
 
 
 class SOMLayerStateWidget(QWidget):
@@ -117,27 +70,72 @@ class SOMLayerStateWidget(QWidget):
 
         super(SOMLayerStateWidget, self).__init__()
 
-        self.checkbox = QCheckBox('Fill markers')
+        self.view_map = QRadioButton("View Map")
+        self.view_img = QRadioButton("View single image")
         layout = QVBoxLayout()
-        layout.addWidget(self.checkbox)
+        layout.addWidget(self.view_map)
+        layout.addWidget(self.view_img)
         self.setLayout(layout)
 
         self.layer_state = layer_artist.state
-        self._connection = connect_checkable_button(self.layer_state, 'fill', self.checkbox)
+        #self._connection = connect_checkable_button(self.layer_state, 'fill', self.checkbox)
 
 
-class SOMDataViewer(MatplotlibDataViewer):
+class SOMWidget(MplWidget):
+    def __init__(self):
+        super(SOMWidget, self).__init__()
+
+
+class SOMDataViewer(ImageViewer):
 
     LABEL = 'SOM viewer'
     _state_cls = SOMViewerState
-    _options_cls = SOMViewerStateWidget
+    #_options_cls = SOMViewerStateWidget
     _layer_style_widget_cls = SOMLayerStateWidget
     _data_artist_cls = SOMLayerArtist
     _subset_artist_cls = SOMLayerArtist
 
     def __init__(self, *args, **kwargs):
         super(SOMDataViewer, self).__init__(*args, **kwargs)
+        self.mpl_widget = SOMWidget()
+        self.setCentralWidget(self.mpl_widget)
+        self.central_widget = self.mpl_widget
 
+        self.figure = self.create_plot()
+        self.axs = self.figure.axes
+        self.setup_callbacks()
+        self.central_widget.resize(1500, 1500)
+        self.resize(self.central_widget.size())
 
+    def setup_callbacks(self):
+        self._wcs_set = False
+        self._changing_slice_requires_wcs_update = None
+        self.state.add_callback('x_att', self._set_wcs)
+        self.state.add_callback('y_att', self._set_wcs)
+        self.state.add_callback('slices', self._on_slice_change)
+        self.state.add_callback('reference_data', self._set_wcs, echo_old=True)
+
+        for i in range(len(self.axs)):
+            ax = self.axs[i]
+            ax.set_adjustable('datalim')
+            ax._composite = CompositeArray()
+            ax._composite_image = imshow(ax, ax._composite, aspect='auto',
+                                            origin='lower', interpolation='nearest')
+        self._set_wcs()
+
+    def get_data_layer_artist(self, layer=None, layer_state=None):
+        return self.get_layer_artist(self._data_artist_cls, layer=layer, layer_state=layer_state)
+
+    def get_layer_artist(self, cls, layer=None, layer_state=None):
+        return cls(self.axs, self.state, layer=layer, layer_state=layer_state)
+
+    def create_plot(self):
+        figure = self.central_widget.canvas.fig
+        for i in range(25):
+            axes = WCSAxesSubplot(figure, 5, 5, i+1)
+            axes.axis('off')
+            figure.add_axes(axes)
+        plt.tight_layout()
+        return figure
 
 qt_client.add(SOMDataViewer)
